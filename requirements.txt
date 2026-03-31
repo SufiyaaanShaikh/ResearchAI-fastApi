@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sentence-transformers
+scikit-learn
+keybert
+numpy
+pymupdf
+faiss-cpu
+rank_bm25

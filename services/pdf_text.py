@@ -48,7 +48,7 @@ def _clean_page_text(page_text: str, references_started: bool) -> tuple[str, boo
         if _REFERENCES_HEADER.match(line):
             return "", True
 
-        if _FIGURE_CAPTION.match(line):
+        if _FIGURE_CAPTION.match(line) and len(line.strip()) < 80:
             continue
 
         normalized_line = _MULTISPACE.sub(" ", line)

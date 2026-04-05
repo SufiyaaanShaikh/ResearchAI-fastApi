@@ -47,6 +47,7 @@ class PDFTextResponse(BaseModel):
 class RagQueryRequest(BaseModel):
     pdf_url: str
     question: str
+    top_n: int = 20
 
 
 class RagChunk(BaseModel):

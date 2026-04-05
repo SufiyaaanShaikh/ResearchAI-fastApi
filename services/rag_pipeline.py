@@ -45,7 +45,10 @@ _embedding_cache: Dict[str, RagCacheEntry] = {}
 
 _SECTION_HEADER_REGEX = re.compile(
     r"^\s*(?:[IVX]{1,6}\.\s+)?("
-    r"Introduction|Related Work|Method|Methodology|Approach|Experiment|Dataset|Results|Discussion|Conclusion|Future Work"
+    r"Introduction|Related Work|Method|Methodology|Approach|Experiment|Dataset|Results|Discussion|Conclusion|Future Work|"
+    r"Background|Preliminaries|Notation|Overview|Framework|Architecture|System|Training|Formulation|Objective|Loss|"
+    r"Evaluation|Baseline|Ablation|Analysis|Limitation|Appendix|Supplement|Contribution|Motivation|Problem Statement|"
+    r"Related|Prior Work"
     r")\s*$",
     re.IGNORECASE,
 )
@@ -87,6 +90,10 @@ _TOKEN_SPLIT_REGEX = re.compile(r"\W+")
 # parameters sections that IEEE papers typically have.
 # ---------------------------------------------------------------------------
 _SECTION_KEYWORDS: Dict[str, List[str]] = {
+    "background": [
+        "background", "preliminar", "notation", "overview", "framework",
+        "architecture", "formulation", "prior work", "related work", "motivation",
+    ],
     "experiment": ["experiment", "experiment design", "experiment 1", "experiment 2"],
     "methodology": ["method", "methodology", "approach", "model"],
     "dataset": ["dataset", "data used"],
@@ -103,6 +110,10 @@ _SECTION_KEYWORDS: Dict[str, List[str]] = {
 }
 
 _SECTION_LABEL_MAP: Dict[str, List[str]] = {
+    "background": [
+        "background", "preliminar", "notation", "overview", "framework",
+        "architecture", "formulation", "prior work", "related work", "motivation",
+    ],
     "experiment": ["experiment", "evaluation"],
     "methodology": ["method", "methodology", "approach", "model"],
     "dataset": ["dataset", "data"],
@@ -191,8 +202,8 @@ def _words_to_chunks(
     section: str,
     page: int,
     chunk_counter: List[int],
-    chunk_size: int = 400,   # FIX E: reduced from 1500 → tables are short & dense
-    overlap: int = 80,       # FIX E: reduced from 250 proportionally
+    chunk_size: int = 600,
+    overlap: int = 150,
 ) -> List[ChunkMeta]:
     if not words:
         return []
@@ -348,7 +359,12 @@ def _section_match(section_name: str, chunk_section: str) -> bool:
 # Main retrieval entry point
 # ---------------------------------------------------------------------------
 
-def retrieve_relevant_chunks(pdf_url: str, question: str, top_k: int = 40) -> List[RetrievedChunk]:
+def retrieve_relevant_chunks(
+    pdf_url: str,
+    question: str,
+    top_k: int = 60,
+    top_n: int = 20,
+) -> List[RetrievedChunk]:
     entry = _get_or_build_entry(pdf_url)
     if not entry["chunks"]:
         return []
@@ -404,7 +420,31 @@ def retrieve_relevant_chunks(pdf_url: str, question: str, top_k: int = 40) -> Li
         scored.append((chunk, score))
 
     scored.sort(key=lambda pair: pair[1], reverse=True)
-    top_scored = scored[:10]
+
+    chunk_positions = {
+        chunk["chunk_id"]: idx
+        for idx, chunk in enumerate(entry["chunks"])
+    }
+    scored_ids = {chunk["chunk_id"] for chunk, _ in scored}
+    neighbor_candidates: List[Tuple[ChunkMeta, float]] = []
+    for chunk, score in scored[:5]:
+        chunk_index = chunk_positions.get(chunk["chunk_id"])
+        if chunk_index is None:
+            continue
+        for neighbor_index in (chunk_index - 1, chunk_index + 1):
+            if 0 <= neighbor_index < len(entry["chunks"]):
+                neighbor_chunk = entry["chunks"][neighbor_index]
+                neighbor_id = neighbor_chunk["chunk_id"]
+                if neighbor_id in scored_ids:
+                    continue
+                scored_ids.add(neighbor_id)
+                neighbor_candidates.append((neighbor_chunk, score * 0.8))
+
+    if neighbor_candidates:
+        scored.extend(neighbor_candidates)
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+
+    top_scored = scored[:top_n]
 
     final_chunks: List[RetrievedChunk] = [
         {

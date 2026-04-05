@@ -62,7 +62,24 @@ def extract_full_paper_text(payload: PDFTextRequest) -> PDFTextResponse:
     return PDFTextResponse(text=text)
 
 
+@app.get("/extract-pdf-sections")
+def extract_sections(pdf_url: str) -> dict:
+    from services.pdf_text import extract_pdf_pages
+    from services.rag_pipeline import _extract_section_title
+
+    pages = extract_pdf_pages(pdf_url)
+    sections = []
+    seen = set()
+    for page in pages:
+        for line in page.splitlines():
+            title = _extract_section_title(line)
+            if title and title not in seen:
+                seen.add(title)
+                sections.append(title)
+    return {"sections": sections}
+
+
 @app.post("/rag-query", response_model=RagQueryResponse)
 def rag_query(payload: RagQueryRequest) -> RagQueryResponse:
-    results = retrieve_relevant_chunks(payload.pdf_url, payload.question, top_k=40)
+    results = retrieve_relevant_chunks(payload.pdf_url, payload.question, top_k=60, top_n=payload.top_n)
     return RagQueryResponse(context_chunks=results)

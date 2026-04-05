@@ -14,6 +14,7 @@ _TABLE_WORD = re.compile(r"\btable\b", re.IGNORECASE)
 _NUMERIC_TOKEN = re.compile(r"^[\d.,%+\-]+$")
 _MULTISPACE = re.compile(r"\s{2,}")
 _MULTIBLANKLINES = re.compile(r"\n{3,}")
+_TABLE_SPLIT = re.compile(r"\t+|\s{2,}")
 
 # FIX 6 (from previous session): Only skip SHORT standalone figure caption
 # lines, not every line that mentions "figure".
@@ -35,6 +36,23 @@ def _is_table_like_line(line: str) -> bool:
     return numeric_ratio >= 0.5 or (numeric_ratio >= 0.35 and many_columns)
 
 
+def _looks_like_table_data_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    separators = re.findall(r"\t+|\s{2,}", stripped)
+    if len(separators) < 2:
+        return False
+
+    columns = [part.strip() for part in _TABLE_SPLIT.split(stripped) if part.strip()]
+    if len(columns) < 3:
+        return False
+
+    numeric_columns = sum(1 for column in columns if re.search(r"\d", column))
+    return numeric_columns >= 2
+
+
 def _clean_page_text(page_text: str, references_started: bool) -> tuple[str, bool]:
     if references_started:
         return "", True
@@ -49,11 +67,14 @@ def _clean_page_text(page_text: str, references_started: bool) -> tuple[str, boo
         if _REFERENCES_HEADER.match(line):
             return "", True
 
-        # FIX 6: Only skip short figure-only captions, not data lines.
-        if _FIGURE_CAPTION.match(line) and len(line) < _MAX_CAPTION_LINE_LENGTH:
+        # Keep full captions because they often contain the experiment takeaway.
+        # Only drop pure labels like "Fig. 1" with no descriptive body.
+        if _FIGURE_CAPTION.match(line) and len(line) < 15:
             continue
 
         normalized_line = _MULTISPACE.sub(" ", line)
+        if _FIGURE_CAPTION.match(line) and len(line) < _MAX_CAPTION_LINE_LENGTH:
+            normalized_line = f"[FIGURE] {normalized_line}"
         kept_lines.append(normalized_line)
 
     cleaned = "\n".join(kept_lines)
@@ -94,7 +115,17 @@ def _extract_page_text_blocks(page: fitz.Page) -> str:
         raw: str = block[4]
         stripped = raw.strip()
         if stripped:
-            lines.append(stripped)
+            block_lines: list[str] = []
+            for block_line in stripped.splitlines():
+                cleaned_line = block_line.strip()
+                if not cleaned_line:
+                    continue
+                if _looks_like_table_data_line(cleaned_line):
+                    block_lines.append(f"[TABLE DATA] {cleaned_line}")
+                else:
+                    block_lines.append(cleaned_line)
+            if block_lines:
+                lines.append("\n".join(block_lines))
             lines.append("")   # blank line = paragraph boundary for the chunker
     return "\n".join(lines)
 
@@ -127,3 +158,26 @@ def extract_pdf_pages(pdf_url: str) -> tuple[str, ...]:
 def extract_pdf_text(pdf_url: str) -> str:
     pages = extract_pdf_pages(pdf_url)
     return "\n\n".join(pages).strip()
+
+
+@lru_cache(maxsize=64)
+def extract_pdf_section(pdf_url: str, section_name: str) -> str:
+    """Extract all text from chunks belonging to a specific section."""
+    pages = extract_pdf_pages(pdf_url)
+    full_text = "\n\n".join(pages)
+    pattern = re.compile(
+        rf"^(?:[IVX]{{1,6}}\.\s+)?{re.escape(section_name)}\b",
+        re.IGNORECASE | re.MULTILINE
+    )
+    match = pattern.search(full_text)
+    if not match:
+        return ""
+    start = match.start()
+    next_section = re.compile(
+        r"^(?:[IVX]{1,6}\.\s+)?[A-Z][A-Za-z\s\-]{2,60}$",
+        re.MULTILINE
+    )
+    remaining = full_text[start + len(match.group()):]
+    next_match = next_section.search(remaining)
+    end = start + len(match.group()) + (next_match.start() if next_match else len(remaining))
+    return full_text[start:end].strip()

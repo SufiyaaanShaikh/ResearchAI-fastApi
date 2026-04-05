@@ -15,19 +15,20 @@ _NUMERIC_TOKEN = re.compile(r"^[\d.,%+\-]+$")
 _MULTISPACE = re.compile(r"\s{2,}")
 _MULTIBLANKLINES = re.compile(r"\n{3,}")
 
+# FIX 6 (from previous session): Only skip SHORT standalone figure caption
+# lines, not every line that mentions "figure".
+_MAX_CAPTION_LINE_LENGTH = 120
+
 
 def _is_table_like_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
-
     if _TABLE_WORD.search(stripped):
         return True
-
     tokens = stripped.split()
     if len(tokens) < 4:
         return False
-
     numeric_tokens = sum(1 for token in tokens if _NUMERIC_TOKEN.match(token))
     numeric_ratio = numeric_tokens / max(len(tokens), 1)
     many_columns = stripped.count("  ") >= 3
@@ -48,7 +49,8 @@ def _clean_page_text(page_text: str, references_started: bool) -> tuple[str, boo
         if _REFERENCES_HEADER.match(line):
             return "", True
 
-        if _FIGURE_CAPTION.match(line) and len(line.strip()) < 80:
+        # FIX 6: Only skip short figure-only captions, not data lines.
+        if _FIGURE_CAPTION.match(line) and len(line) < _MAX_CAPTION_LINE_LENGTH:
             continue
 
         normalized_line = _MULTISPACE.sub(" ", line)
@@ -59,6 +61,44 @@ def _clean_page_text(page_text: str, references_started: bool) -> tuple[str, boo
     return cleaned, False
 
 
+# ---------------------------------------------------------------------------
+# FIX 5: Block-aware page extraction
+# ---------------------------------------------------------------------------
+#
+# The original code called page.get_text("text") which concatenates all text
+# spans in the order PyMuPDF encounters them internally.  For single-column
+# papers this is fine.  For two-column IEEE / ACM papers it is wrong:
+# PyMuPDF returns left-column text interleaved with right-column text because
+# the internal span order follows PDF object IDs, not visual reading order.
+#
+# The fix uses page.get_text("blocks", sort=True):
+#   "blocks"  — returns one entry per text block (paragraph / table row / caption)
+#               rather than one giant string, giving us structural boundaries.
+#   sort=True — re-sorts blocks by their top-left corner (y then x), which
+#               matches visual reading order: top-to-bottom, left col before right.
+#
+# Each block entry is a tuple:
+#   (x0, y0, x1, y1, text, block_no, block_type)
+# block_type == 0 = text block; block_type == 1 = image block (skip).
+#
+# We insert explicit blank lines between blocks so that the downstream chunker
+# correctly detects paragraph boundaries and standalone table-header lines.
+
+def _extract_page_text_blocks(page: fitz.Page) -> str:
+    blocks = page.get_text("blocks", sort=True)   # sort=True = reading order
+    lines: list[str] = []
+    for block in blocks:
+        # block_type: 0 = text, 1 = image — skip images
+        if block[6] != 0:
+            continue
+        raw: str = block[4]
+        stripped = raw.strip()
+        if stripped:
+            lines.append(stripped)
+            lines.append("")   # blank line = paragraph boundary for the chunker
+    return "\n".join(lines)
+
+
 @lru_cache(maxsize=64)
 def extract_pdf_pages(pdf_url: str) -> tuple[str, ...]:
     with urlopen(pdf_url) as response:
@@ -66,7 +106,8 @@ def extract_pdf_pages(pdf_url: str) -> tuple[str, ...]:
 
     document = fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf")
     try:
-        raw_pages = [page.get_text("text") for page in document]
+        # FIX 5: Use block-aware extraction instead of plain get_text("text")
+        raw_pages = [_extract_page_text_blocks(page) for page in document]
     finally:
         document.close()
 

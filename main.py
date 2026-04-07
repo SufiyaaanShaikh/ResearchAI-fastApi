@@ -91,3 +91,13 @@ def extract_sections(pdf_url: str) -> dict:
 def rag_query(payload: RagQueryRequest) -> RagQueryResponse:
     results = retrieve_relevant_chunks(payload.pdf_url, payload.question, top_k=60, top_n=payload.top_n)
     return RagQueryResponse(context_chunks=results)
+
+
+from routers.papers import router as papers_router
+
+app.include_router(papers_router)
+
+
+from routers.query import router as query_router
+
+app.include_router(query_router)

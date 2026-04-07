@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from dataclasses import dataclass
+
+import asyncpg
+import numpy as np
+from dotenv import load_dotenv
+from pgvector.asyncpg import register_vector
+
+from services.embedding_service import embed_query
+
+load_dotenv()
+
+DEFAULT_DATABASE_URL = "postgresql+asyncpg://user:admin123@localhost:5432/researchai"
+
+
+@dataclass
+class RetrievedChunk:
+    chunk_id: str
+    paper_id: str
+    content: str
+    section_name: str
+    page_start: int
+    chunk_type: str
+    vector_score: float
+    keyword_score: float
+    combined_score: float
+    chunk_index: int
+
+
+def _get_asyncpg_database_url() -> str:
+    database_url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+    if database_url.startswith("postgresql+asyncpg://"):
+        return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    if database_url.startswith("postgresql+psycopg2://"):
+        return database_url.replace("postgresql+psycopg2://", "postgresql://", 1)
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql://", 1)
+    return database_url
+
+
+async def _connect() -> asyncpg.Connection:
+    connection = await asyncpg.connect(_get_asyncpg_database_url())
+    await register_vector(connection)
+    return connection
+
+
+def _row_to_chunk(
+    row: asyncpg.Record,
+    *,
+    vector_score: float = 0.0,
+    keyword_score: float = 0.0,
+    combined_score: float = 0.0,
+) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=str(row["id"]),
+        paper_id=str(row["paper_id"]),
+        content=str(row["content"]),
+        section_name=str(row["section_name"] or "Unknown"),
+        page_start=int(row["page_start"] or 0),
+        chunk_type=str(row["chunk_type"] or "paragraph"),
+        vector_score=float(vector_score),
+        keyword_score=float(keyword_score),
+        combined_score=float(combined_score),
+        chunk_index=int(row["chunk_index"] or 0),
+    )
+
+
+async def vector_search(paper_id: str, query_embedding: np.ndarray, top_k: int = 40) -> list[RetrievedChunk]:
+    """
+    pgvector cosine similarity search scoped to one paper.
+    """
+    connection = await _connect()
+    try:
+        rows = await connection.fetch(
+            """
+            SELECT
+                pc.id,
+                pc.paper_id,
+                pc.content,
+                pc.chunk_type,
+                pc.page_start,
+                pc.chunk_index,
+                ps.section_name,
+                1 - (pc.embedding <=> $1::vector) AS score
+            FROM paper_chunks pc
+            LEFT JOIN paper_sections ps ON pc.section_id = ps.id
+            WHERE pc.paper_id = $2::uuid
+            ORDER BY pc.embedding <=> $1::vector
+            LIMIT $3
+            """,
+            query_embedding.tolist(),
+            paper_id,
+            top_k,
+        )
+        return [_row_to_chunk(row, vector_score=float(row["score"] or 0.0)) for row in rows]
+    finally:
+        await connection.close()
+
+
+async def keyword_search(paper_id: str, question: str, top_k: int = 40) -> list[RetrievedChunk]:
+    """
+    PostgreSQL full-text search scoped to one paper.
+    """
+    connection = await _connect()
+    try:
+        rows = await connection.fetch(
+            """
+            SELECT
+                pc.id,
+                pc.paper_id,
+                pc.content,
+                pc.chunk_type,
+                pc.page_start,
+                pc.chunk_index,
+                ps.section_name,
+                ts_rank(
+                    to_tsvector('english', pc.content),
+                    plainto_tsquery('english', $1)
+                ) AS score
+            FROM paper_chunks pc
+            LEFT JOIN paper_sections ps ON pc.section_id = ps.id
+            WHERE pc.paper_id = $2::uuid
+              AND to_tsvector('english', pc.content) @@ plainto_tsquery('english', $1)
+            ORDER BY score DESC
+            LIMIT $3
+            """,
+            question,
+            paper_id,
+            top_k,
+        )
+        return [_row_to_chunk(row, keyword_score=float(row["score"] or 0.0)) for row in rows]
+    finally:
+        await connection.close()
+
+
+async def hybrid_retrieve(paper_id: str, question: str, top_k: int = 40) -> list[RetrievedChunk]:
+    """
+    Run vector and keyword search in parallel and merge their scores.
+    """
+    query_embedding = embed_query(question)
+    vector_results, keyword_results = await asyncio.gather(
+        vector_search(paper_id, query_embedding, top_k=top_k),
+        keyword_search(paper_id, question, top_k=top_k),
+    )
+
+    merged: dict[str, RetrievedChunk] = {}
+
+    for chunk in vector_results:
+        chunk.combined_score = 0.5 * chunk.vector_score
+        merged[chunk.chunk_id] = chunk
+
+    for chunk in keyword_results:
+        existing = merged.get(chunk.chunk_id)
+        if existing is None:
+            chunk.combined_score = 0.5 * chunk.keyword_score
+            merged[chunk.chunk_id] = chunk
+            continue
+
+        existing.keyword_score = chunk.keyword_score
+        existing.combined_score = (0.5 * existing.vector_score) + (0.5 * existing.keyword_score)
+
+    results = sorted(merged.values(), key=lambda chunk: chunk.combined_score, reverse=True)
+    return results[:top_k]

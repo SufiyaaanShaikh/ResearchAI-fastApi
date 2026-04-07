@@ -7,3 +7,12 @@ numpy
 pymupdf
 faiss-cpu
 rank_bm25
+httpx
+python-multipart
+asyncpg
+psycopg2-binary
+sqlalchemy[asyncio]>=2.0
+pgvector
+python-dotenv
+groq
+tenacity

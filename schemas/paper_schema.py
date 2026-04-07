@@ -59,3 +59,27 @@ class RagChunk(BaseModel):
 
 class RagQueryResponse(BaseModel):
     context_chunks: List[RagChunk]
+
+
+class PaperQueryRequest(BaseModel):
+    paper_id: str
+    question: str
+    top_k: int = 40
+    top_n: int = 12
+    include_history: bool = True
+
+
+class CitationItem(BaseModel):
+    chunk_id: str
+    page: int
+    section: str
+    snippet: str
+
+
+class PaperQueryResponse(BaseModel):
+    paper_id: str
+    question: str
+    answer: str
+    citations: List[CitationItem]
+    chunks_used: int
+    model: str

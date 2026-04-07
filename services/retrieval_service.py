@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from pgvector.asyncpg import register_vector
 
 from services.embedding_service import embed_query
+from services.rag_pipeline import _SECTION_LABEL_MAP, _detect_section_focus
 
 load_dotenv()
 
@@ -136,31 +137,102 @@ async def keyword_search(paper_id: str, question: str, top_k: int = 40) -> list[
         await connection.close()
 
 
+async def section_search(
+    paper_id: str,
+    question: str,
+    top_k: int = 40,
+) -> list[RetrievedChunk]:
+    """
+    Retrieve all chunks whose section_name matches the detected section intent.
+    This is the primary fix for queries like 'What is related work?' where
+    chunk body text does not contain section-specific keywords.
+    """
+    section_focus = _detect_section_focus(question.lower())
+    if section_focus is None:
+        return []
+
+    # Build ILIKE patterns from the label map for this focus.
+    section_terms = _SECTION_LABEL_MAP.get(section_focus, [section_focus])
+    # Convert to SQL ILIKE patterns: 'related work' -> '%related work%'
+    patterns = [f"%{term}%" for term in section_terms]
+
+    connection = await _connect()
+    try:
+        rows = await connection.fetch(
+            """
+            SELECT
+                pc.id,
+                pc.paper_id,
+                pc.content,
+                pc.chunk_type,
+                pc.page_start,
+                pc.chunk_index,
+                ps.section_name
+            FROM paper_chunks pc
+            LEFT JOIN paper_sections ps ON pc.section_id = ps.id
+            WHERE pc.paper_id = $1::uuid
+              AND ps.section_name ILIKE ANY($2::text[])
+            ORDER BY pc.chunk_index ASC
+            LIMIT $3
+            """,
+            paper_id,
+            patterns,
+            top_k,
+        )
+        # Assign a fixed high score since section match is high-confidence.
+        return [
+            _row_to_chunk(row, vector_score=0.6, keyword_score=0.6, combined_score=0.6)
+            for row in rows
+        ]
+    finally:
+        await connection.close()
+
+
 async def hybrid_retrieve(paper_id: str, question: str, top_k: int = 40) -> list[RetrievedChunk]:
     """
     Run vector and keyword search in parallel and merge their scores.
     """
     query_embedding = embed_query(question)
-    vector_results, keyword_results = await asyncio.gather(
+    vector_results, keyword_results, section_results = await asyncio.gather(
         vector_search(paper_id, query_embedding, top_k=top_k),
         keyword_search(paper_id, question, top_k=top_k),
+        section_search(paper_id, question, top_k=top_k),
     )
 
     merged: dict[str, RetrievedChunk] = {}
 
+    VECTOR_WEIGHT = 0.7
+    KEYWORD_WEIGHT = 0.3
+
     for chunk in vector_results:
-        chunk.combined_score = 0.5 * chunk.vector_score
+        # Vector-only: use full vector_score — do not penalise for keyword absence.
+        chunk.combined_score = chunk.vector_score
         merged[chunk.chunk_id] = chunk
 
     for chunk in keyword_results:
         existing = merged.get(chunk.chunk_id)
         if existing is None:
-            chunk.combined_score = 0.5 * chunk.keyword_score
+            # Keyword-only: use weighted keyword score.
+            chunk.combined_score = KEYWORD_WEIGHT * chunk.keyword_score
             merged[chunk.chunk_id] = chunk
             continue
 
+        # Both signals: weighted combination.
         existing.keyword_score = chunk.keyword_score
-        existing.combined_score = (0.5 * existing.vector_score) + (0.5 * existing.keyword_score)
+        existing.combined_score = (
+            VECTOR_WEIGHT * existing.vector_score
+            + KEYWORD_WEIGHT * existing.keyword_score
+        )
+
+    # Merge section_results: if already present, bump score; else insert.
+    for chunk in section_results:
+        existing = merged.get(chunk.chunk_id)
+        if existing is None:
+            merged[chunk.chunk_id] = chunk
+        else:
+            # Existing chunk from vector/keyword: boost its score since it also
+            # matches the target section — strong convergent signal.
+            existing.combined_score = min(1.0, existing.combined_score + 0.15)
 
     results = sorted(merged.values(), key=lambda chunk: chunk.combined_score, reverse=True)
     return results[:top_k]

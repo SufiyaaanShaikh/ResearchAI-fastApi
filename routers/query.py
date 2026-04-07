@@ -144,6 +144,51 @@ async def fetch_paper_metadata(paper_id: str) -> dict:
     }
 
 
+async def fetch_all_chunks_for_paper(paper_id: str) -> list:
+    """
+    Fetch all chunks for a paper to serve as neighbor expansion pool.
+    Only fetches lightweight fields - no embeddings (those are large).
+    Returns list of RetrievedChunk with zero scores (used only for index lookup).
+    """
+    from services.retrieval_service import RetrievedChunk
+    connection = await _connect()
+    try:
+        rows = await connection.fetch(
+            """
+            SELECT
+                pc.id,
+                pc.paper_id,
+                pc.content,
+                pc.chunk_type,
+                pc.page_start,
+                pc.chunk_index,
+                ps.section_name
+            FROM paper_chunks pc
+            LEFT JOIN paper_sections ps ON pc.section_id = ps.id
+            WHERE pc.paper_id = $1::uuid
+            ORDER BY pc.chunk_index ASC
+            """,
+            paper_id,
+        )
+        return [
+            RetrievedChunk(
+                chunk_id=str(row["id"]),
+                paper_id=str(row["paper_id"]),
+                content=str(row["content"]),
+                section_name=str(row["section_name"] or "Unknown"),
+                page_start=int(row["page_start"] or 0),
+                chunk_type=str(row["chunk_type"] or "paragraph"),
+                vector_score=0.0,
+                keyword_score=0.0,
+                combined_score=0.0,
+                chunk_index=int(row["chunk_index"] or 0),
+            )
+            for row in rows
+        ]
+    finally:
+        await connection.close()
+
+
 @router.post("/query", response_model=PaperQueryResponse)
 async def query_paper(
     payload: PaperQueryRequest,
@@ -166,9 +211,33 @@ async def query_paper(
     if not candidates:
         raise HTTPException(status_code=404, detail="No content found for this paper.")
 
-    reranked = rerank_chunks_with_all(payload.question, candidates, candidates, top_n=payload.top_n)
+    # --- Debug logging (stdout only, not returned to caller) ---
+    from services.rag_pipeline import _detect_section_focus
+    section_focus = _detect_section_focus(payload.question.lower())
+    print(f"\n[RAG DEBUG] question='{payload.question}'")
+    print(f"[RAG DEBUG] section_focus={section_focus}")
+    print(f"[RAG DEBUG] candidates retrieved: {len(candidates)}")
+    if candidates:
+        top5_sections = [(c.section_name, round(c.combined_score, 3)) for c in candidates[:5]]
+        print(f"[RAG DEBUG] top-5 candidate sections: {top5_sections}")
+
+    # Fetch full chunk pool for neighbor expansion - neighbours outside top-k
+    # candidates would be invisible if we passed candidates as the pool.
+    all_paper_chunks = await fetch_all_chunks_for_paper(payload.paper_id)
+    reranked = rerank_chunks_with_all(
+        payload.question, candidates, all_paper_chunks, top_n=payload.top_n
+    )
+    print(f"[RAG DEBUG] reranked chunks: {len(reranked)}")
+    if reranked:
+        top_reranked = [(r.section_name, round(r.combined_score, 3)) for r in reranked[:5]]
+        print(f"[RAG DEBUG] top-5 reranked: {top_reranked}")
+
     history = await fetch_chat_history(payload.paper_id) if payload.include_history else None
     built = build_context(paper_metadata, reranked, payload.question, history)
+    print(f"[RAG DEBUG] context chunks included: {len(built.citations)}")
+    print(f"[RAG DEBUG] context tokens (approx): {built.total_tokens}")
+    included = [(c['section'], c['page']) for c in built.citations]
+    print(f"[RAG DEBUG] included sections+pages: {included}")
     answer = await call_groq_llm(built.system_prompt, built.context_text, payload.question)
     await save_chat_history(payload.paper_id, payload.question, answer, [chunk.chunk_id for chunk in reranked])
 

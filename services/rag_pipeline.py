@@ -90,6 +90,24 @@ _TOKEN_SPLIT_REGEX = re.compile(r"\W+")
 # parameters sections that IEEE papers typically have.
 # ---------------------------------------------------------------------------
 _SECTION_KEYWORDS: Dict[str, List[str]] = {
+    # NEW: dedicated related work focus (previously routed through "background")
+    "related_work": [
+        "related work", "prior work", "related works", "existing work",
+        "previous work", "literature review", "survey", "state of the art",
+        "what have others done", "how does this compare",
+    ],
+    # NEW: introduction - currently has no focus key
+    "introduction": [
+        "introduction", "what is this paper about", "what does this paper do",
+        "what is the contribution", "paper overview", "what problem",
+        "what challenge",
+    ],
+    # NEW: architecture - currently falls through to "background" which is imprecise
+    "architecture": [
+        "architecture", "system design", "system overview", "network architecture",
+        "model architecture", "what is the model", "how is the model built",
+        "what layers", "transformer", "encoder", "decoder",
+    ],
     "background": [
         "background", "preliminar", "notation", "overview", "framework",
         "architecture", "formulation", "prior work", "related work", "motivation",
@@ -110,6 +128,20 @@ _SECTION_KEYWORDS: Dict[str, List[str]] = {
 }
 
 _SECTION_LABEL_MAP: Dict[str, List[str]] = {
+    # NEW: related_work matches section names like "Related Work", "Prior Work", etc.
+    "related_work": [
+        "related work", "related works", "prior work", "previous work",
+        "background and related", "literature", "survey",
+    ],
+    # NEW: introduction matches "Introduction" sections
+    "introduction": [
+        "introduction", "overview", "motivation",
+    ],
+    # NEW: architecture matches architecture/system sections
+    "architecture": [
+        "architecture", "system", "model", "network", "design", "framework",
+        "approach", "methodology", "method",
+    ],
     "background": [
         "background", "preliminar", "notation", "overview", "framework",
         "architecture", "formulation", "prior work", "related work", "motivation",

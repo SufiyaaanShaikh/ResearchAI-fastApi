@@ -4,8 +4,10 @@ from dataclasses import dataclass
 
 from services.retrieval_service import RetrievedChunk
 
-MAX_CONTEXT_TOKENS = 6000
-TOKENS_PER_CHAR = 0.25
+MAX_CONTEXT_TOKENS = 12000
+# Word-count based estimation is more accurate for mixed scientific text.
+# 1 token ~= 0.75 words (GPT standard), so words * 1.35 ~= tokens.
+_WORDS_PER_TOKEN_RATIO = 1.35
 
 
 @dataclass
@@ -17,7 +19,8 @@ class BuiltContext:
 
 
 def _estimate_tokens(text: str) -> int:
-    return max(1, int(len(text) * TOKENS_PER_CHAR))
+    """Estimate tokens using word count - more accurate for scientific text."""
+    return max(1, int(len(text.split()) * _WORDS_PER_TOKEN_RATIO))
 
 
 def build_context(
@@ -66,8 +69,14 @@ def build_context(
             f"{chunk.content}\n"
         )
         block_tokens = _estimate_tokens(block)
+
+        # Changed from break to continue:
+        # A single oversized chunk should not prevent smaller subsequent chunks
+        # from being included. Only stop if even a minimal chunk won't fit.
         if block_tokens > chunk_budget:
-            break
+            if chunk_budget < 100:  # Truly exhausted - stop.
+                break
+            continue  # This chunk is too large; try the next one.
 
         evidence_blocks.append(block)
         chunk_budget -= block_tokens
@@ -79,6 +88,21 @@ def build_context(
                 "snippet": chunk.content[:100],
             }
         )
+
+    if not evidence_blocks:
+        # Nothing fit - include first chunk truncated to 800 words as fallback.
+        if chunks:
+            fallback_content = " ".join(chunks[0].content.split()[:800])
+            evidence_blocks.append(
+                f"[1] [Page {chunks[0].page_start} | {chunks[0].section_name}]\n"
+                f"{fallback_content}\n"
+            )
+            citations.append({
+                "chunk_id": chunks[0].chunk_id,
+                "page": chunks[0].page_start,
+                "section": chunks[0].section_name,
+                "snippet": chunks[0].content[:100],
+            })
 
     context_text = base_text + ("\n".join(evidence_blocks).strip() if evidence_blocks else "")
     total_tokens = _estimate_tokens(system_prompt) + _estimate_tokens(context_text)

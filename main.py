@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from db_pool import init_pool
 from models.embedding_model import load_model
 from schemas.paper_schema import (
     ClusterPapersResponse,
@@ -42,8 +43,13 @@ def health_check() -> dict:
 
 
 @app.on_event("startup")
-def startup_event() -> None:
-    load_model()
+async def startup_event() -> None:
+    try:
+        load_model()
+    except Exception as exc:
+        print("Embedding model failed to load:", exc)
+        print("Continuing startup without embeddings cache warmup")
+    await init_pool()
 
 
 @app.post("/similar-papers", response_model=SimilarPapersResponse)

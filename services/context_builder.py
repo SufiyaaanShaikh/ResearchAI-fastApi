@@ -28,6 +28,7 @@ def build_context(
     chunks: list[RetrievedChunk],
     question: str,
     chat_history: list[dict] | None = None,
+    max_context_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> BuiltContext:
     """
     Build a structured context string respecting MAX_CONTEXT_TOKENS.
@@ -59,16 +60,18 @@ def build_context(
     history_tokens = min(200, _estimate_tokens(history_block)) if history_block else 0
     used_tokens = base_tokens + history_tokens
 
-    chunk_budget = MAX_CONTEXT_TOKENS - used_tokens
+    chunk_budget = max_context_tokens - used_tokens
     citations: list[dict] = []
     evidence_blocks: list[str] = []
+    token_total = used_tokens
 
     for index, chunk in enumerate(chunks, start=1):
         block = (
             f"[{index}] [Page {chunk.page_start} | {chunk.section_name}]\n"
             f"{chunk.content}\n"
         )
-        block_tokens = _estimate_tokens(block)
+        chunk_tokens = getattr(chunk, "token_count", None) or len(chunk.content.split())
+        block_tokens = max(chunk_tokens, _estimate_tokens(block))
 
         # Changed from break to continue:
         # A single oversized chunk should not prevent smaller subsequent chunks
@@ -80,6 +83,7 @@ def build_context(
 
         evidence_blocks.append(block)
         chunk_budget -= block_tokens
+        token_total += block_tokens
         citations.append(
             {
                 "chunk_id": chunk.chunk_id,
@@ -105,7 +109,7 @@ def build_context(
             })
 
     context_text = base_text + ("\n".join(evidence_blocks).strip() if evidence_blocks else "")
-    total_tokens = _estimate_tokens(system_prompt) + _estimate_tokens(context_text)
+    total_tokens = min(token_total, _estimate_tokens(system_prompt) + _estimate_tokens(context_text))
     return BuiltContext(
         system_prompt=system_prompt,
         context_text=context_text,

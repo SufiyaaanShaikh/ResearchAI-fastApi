@@ -49,7 +49,7 @@ def rerank_chunks(question: str, chunks: list[RetrievedChunk], top_n: int = 12) 
 def rerank_chunks_with_all(
     question: str,
     candidates: list[RetrievedChunk],
-    all_chunks: list[RetrievedChunk],
+    neighbor_chunks: list[RetrievedChunk],
     top_n: int = 12,
 ) -> list[RetrievedChunk]:
     """Calls rerank_chunks with neighbor expansion support."""
@@ -57,12 +57,15 @@ def rerank_chunks_with_all(
         return []
 
     reranked = rerank_chunks(question, candidates, top_n=len(candidates))
-    all_by_index = {chunk.chunk_index: chunk for chunk in sorted(all_chunks, key=lambda item: item.chunk_index)}
+    neighbor_lookup = {
+        chunk.chunk_index: chunk
+        for chunk in neighbor_chunks
+    }
     selected: dict[str, RetrievedChunk] = {chunk.chunk_id: chunk for chunk in reranked}
 
     for chunk in reranked[:5]:
         for neighbor_index in (chunk.chunk_index - 1, chunk.chunk_index + 1):
-            neighbor = all_by_index.get(neighbor_index)
+            neighbor = neighbor_lookup.get(neighbor_index)
             if neighbor is None or neighbor.chunk_id in selected:
                 continue
 

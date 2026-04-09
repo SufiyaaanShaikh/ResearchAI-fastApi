@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncGenerator
 
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-load_dotenv()
-
-DEFAULT_DATABASE_URL = "postgresql+asyncpg://user:password@localhost:5432/researchai"
+from config import DATABASE_URL
 
 
 def _to_async_database_url(database_url: str) -> str:
@@ -36,8 +32,7 @@ def _to_sync_database_url(database_url: str) -> str:
     return database_url
 
 
-DATABASE_URL = _to_async_database_url(os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL))
-SYNC_DATABASE_URL = _to_sync_database_url(DATABASE_URL)
+SYNC_DATABASE_URL = _to_sync_database_url(_to_async_database_url(DATABASE_URL))
 
 engine = create_async_engine(DATABASE_URL, pool_pre_ping=True)
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)

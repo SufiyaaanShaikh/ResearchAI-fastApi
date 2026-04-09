@@ -55,6 +55,65 @@ SQL_STATEMENTS = [
     );
     """,
     """
+    DO $$
+    BEGIN
+      ALTER TABLE paper_chunks
+      ADD COLUMN content_tsv tsvector
+      GENERATED ALWAYS AS (
+        to_tsvector('english', coalesce(content, ''))
+      ) STORED;
+    EXCEPTION
+      WHEN duplicate_column THEN NULL;
+    END $$;
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_paper_chunks_content_tsv
+    ON paper_chunks USING GIN (content_tsv);
+    """,
+    """
+    DELETE FROM paper_chunks a
+    USING paper_chunks b
+    WHERE a.ctid < b.ctid
+    AND a.paper_id = b.paper_id
+    AND a.chunk_index = b.chunk_index;
+    """,
+    """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'uq_paper_chunk'
+      ) THEN
+        ALTER TABLE paper_chunks
+        ADD CONSTRAINT uq_paper_chunk
+        UNIQUE (paper_id, chunk_index);
+      END IF;
+    END $$;
+    """,
+    """
+    DELETE FROM paper_sections a
+    USING paper_sections b
+    WHERE a.ctid < b.ctid
+    AND a.paper_id = b.paper_id
+    AND a.section_name = b.section_name
+    AND COALESCE(a.section_order, -1) = COALESCE(b.section_order, -1);
+    """,
+    """
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'uq_paper_section'
+      ) THEN
+        ALTER TABLE paper_sections
+        ADD CONSTRAINT uq_paper_section
+        UNIQUE (paper_id, section_name, section_order);
+      END IF;
+    END $$;
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_paper_chunks_paper_id ON paper_chunks(paper_id);
     """,
     """

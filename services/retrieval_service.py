@@ -1,20 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 
 import asyncpg
 import numpy as np
-from dotenv import load_dotenv
-from pgvector.asyncpg import register_vector
 
+from db_pool import get_pool
 from services.embedding_service import embed_query
 from services.rag_pipeline import _SECTION_LABEL_MAP, _detect_section_focus
-
-load_dotenv()
-
-DEFAULT_DATABASE_URL = "postgresql+asyncpg://user:admin123@localhost:5432/researchai"
 
 
 @dataclass
@@ -29,23 +23,6 @@ class RetrievedChunk:
     keyword_score: float
     combined_score: float
     chunk_index: int
-
-
-def _get_asyncpg_database_url() -> str:
-    database_url = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
-    if database_url.startswith("postgresql+asyncpg://"):
-        return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    if database_url.startswith("postgresql+psycopg2://"):
-        return database_url.replace("postgresql+psycopg2://", "postgresql://", 1)
-    if database_url.startswith("postgres://"):
-        return database_url.replace("postgres://", "postgresql://", 1)
-    return database_url
-
-
-async def _connect() -> asyncpg.Connection:
-    connection = await asyncpg.connect(_get_asyncpg_database_url())
-    await register_vector(connection)
-    return connection
 
 
 def _row_to_chunk(
@@ -73,8 +50,8 @@ async def vector_search(paper_id: str, query_embedding: np.ndarray, top_k: int =
     """
     pgvector cosine similarity search scoped to one paper.
     """
-    connection = await _connect()
-    try:
+    pool = get_pool()
+    async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
             SELECT
@@ -97,16 +74,14 @@ async def vector_search(paper_id: str, query_embedding: np.ndarray, top_k: int =
             top_k,
         )
         return [_row_to_chunk(row, vector_score=float(row["score"] or 0.0)) for row in rows]
-    finally:
-        await connection.close()
 
 
 async def keyword_search(paper_id: str, question: str, top_k: int = 40) -> list[RetrievedChunk]:
     """
     PostgreSQL full-text search scoped to one paper.
     """
-    connection = await _connect()
-    try:
+    pool = get_pool()
+    async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
             SELECT
@@ -133,8 +108,6 @@ async def keyword_search(paper_id: str, question: str, top_k: int = 40) -> list[
             top_k,
         )
         return [_row_to_chunk(row, keyword_score=float(row["score"] or 0.0)) for row in rows]
-    finally:
-        await connection.close()
 
 
 async def section_search(
@@ -156,8 +129,8 @@ async def section_search(
     # Convert to SQL ILIKE patterns: 'related work' -> '%related work%'
     patterns = [f"%{term}%" for term in section_terms]
 
-    connection = await _connect()
-    try:
+    pool = get_pool()
+    async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
             SELECT
@@ -184,8 +157,6 @@ async def section_search(
             _row_to_chunk(row, vector_score=0.6, keyword_score=0.6, combined_score=0.6)
             for row in rows
         ]
-    finally:
-        await connection.close()
 
 
 async def hybrid_retrieve(paper_id: str, question: str, top_k: int = 40) -> list[RetrievedChunk]:

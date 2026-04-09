@@ -183,3 +183,37 @@ async def list_papers(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]
         """
     )
     return [dict(row) for row in rows]
+
+
+@router.get("/by-arxiv/{arxiv_id}")
+async def paper_by_arxiv_id(
+    arxiv_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Look up a paper by its arxiv_id.
+    Returns paper_id (UUID), status, title, and created_at if found.
+    Returns 404 if not ingested yet.
+
+    Used by the frontend to resolve arxiv ID -> UUID before calling /papers/query.
+    """
+    connection = await _get_asyncpg_connection(db)
+    row = await connection.fetchrow(
+        """
+        SELECT id, title, status, created_at
+        FROM papers
+        WHERE arxiv_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        arxiv_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Paper not ingested yet.")
+    return {
+        "paper_id": str(row["id"]),
+        "arxiv_id": arxiv_id,
+        "title": row["title"],
+        "status": row["status"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }

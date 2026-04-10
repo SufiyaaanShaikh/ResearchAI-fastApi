@@ -20,7 +20,7 @@ from schemas.paper_schema import (
 from services.clustering import cluster_papers
 from services.keywords import extract_keywords
 from services.pdf_text import extract_pdf_text
-from services.rag_pipeline import retrieve_relevant_chunks
+from services.rag_pipeline import _get_reranker_model, retrieve_relevant_chunks
 from services.similarity import find_similar_papers
 
 app = FastAPI(title="ResearchAI FastAPI Service", version="1.0.0")
@@ -49,6 +49,11 @@ async def startup_event() -> None:
     except Exception as exc:
         print("Embedding model failed to load:", exc)
         print("Continuing startup without embeddings cache warmup")
+    try:
+        _get_reranker_model()
+    except Exception as exc:
+        print("Reranker failed to load during startup:", exc)
+        print("Continuing startup without reranker warmup")
     await init_pool()
 
 

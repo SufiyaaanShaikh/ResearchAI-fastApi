@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger("researchai")
 
 
 def _normalize_database_url(database_url: str) -> str:
@@ -29,3 +31,7 @@ if not _raw_groq_api_key:
 
 DATABASE_URL = _normalize_database_url(_raw_database_url)
 GROQ_API_KEY = _raw_groq_api_key
+
+logger.info(
+    f"GROQ_API_KEY loaded: {'YES (len=' + str(len(GROQ_API_KEY)) + ')' if GROQ_API_KEY else 'NO - THIS WILL FAIL'}"
+)

@@ -179,8 +179,14 @@ def _get_embedding_model() -> SentenceTransformer:
 
 def _get_reranker_model() -> CrossEncoder:
     global _reranker_model
+
     if _reranker_model is None:
-        _reranker_model = CrossEncoder("BAAI/bge-reranker-large")
+        print("Loading reranker model once at startup...")
+        _reranker_model = CrossEncoder(
+            "BAAI/bge-reranker-large",
+            trust_remote_code=True
+        )
+
     return _reranker_model
 
 

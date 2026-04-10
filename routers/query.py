@@ -4,10 +4,8 @@ from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-import json
 
 from config import GROQ_API_KEY
 from db import get_db
@@ -22,14 +20,17 @@ router = APIRouter(prefix="/papers", tags=["query"])
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
+FALLBACK_MODEL = "mixtral-8x7b-32768"
 MAX_OUTPUT_TOKENS = 2048
 MAX_CONTEXT_TOKENS = 5000
 
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=8),
-    retry=retry_if_exception_type(httpx.HTTPError),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(
+        (httpx.HTTPError, httpx.HTTPStatusError)
+    ),
     reraise=True,
 )
 async def call_groq_llm(system_prompt: str, context_text: str, question: str) -> str:
@@ -52,8 +53,29 @@ async def call_groq_llm(system_prompt: str, context_text: str, question: str) ->
     }
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(GROQ_API_URL, json=payload, headers=headers)
+            if response.status_code == 400 and "model_decommissioned" in response.text:
+                payload["model"] = FALLBACK_MODEL
+                response = await client.post(
+                    GROQ_API_URL,
+                    headers=headers,
+                    json=payload,
+                )
+            if response.status_code != 200:
+                print("Groq failure status:", response.status_code)
+                print("Groq failure body:", response.text)
+            if response.status_code in (429, 500, 502, 503, 504):
+                raise httpx.HTTPStatusError(
+                    f"Retryable Groq failure: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Groq API unavailable after retries."
+                )
             response.raise_for_status()
     except httpx.HTTPError as exc:
         raise exc
@@ -65,57 +87,6 @@ async def call_groq_llm(system_prompt: str, context_text: str, question: str) ->
         return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError) as exc:
         raise HTTPException(status_code=503, detail="Groq API returned an invalid response.") from exc
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=8),
-    retry=retry_if_exception_type(httpx.HTTPError),
-    reraise=True,
-)
-async def stream_groq_llm(system_prompt: str, context_text: str, question: str):
-    """
-    Stream Groq tokens as server-sent events.
-    """
-    payload = {
-        "model": GROQ_MODEL,
-        "max_tokens": MAX_OUTPUT_TOKENS,
-        "temperature": 0.1,
-        "stream": True,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{context_text}\n\nQUESTION: {question}"},
-        ],
-    }
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", GROQ_API_URL, json=payload, headers=headers) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-
-                    data = line[6:].strip()
-                    if data == "[DONE]":
-                        break
-
-                    try:
-                        chunk = json.loads(data)
-                        token = chunk["choices"][0]["delta"].get("content")
-                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                        continue
-
-                    if token:
-                        yield f"data: {json.dumps({'token': token})}\n\n"
-    except httpx.HTTPError:
-        yield "event: error\ndata: Groq API unavailable after retries.\n\n"
-
-    yield "event: done\ndata: end\n\n"
 
 
 async def fetch_chat_history(paper_id: str, limit: int = 3) -> list[dict]:
@@ -315,22 +286,4 @@ async def query_paper(
         citations=built.citations,
         chunks_used=len(reranked),
         model=GROQ_MODEL,
-    )
-
-
-@router.post("/query/stream")
-async def query_paper_stream(
-    payload: PaperQueryRequest,
-    db: AsyncSession = Depends(get_db),
-) -> StreamingResponse:
-    reranked, built = await _prepare_query_context(payload, db)
-    _ = reranked
-    return StreamingResponse(
-        stream_groq_llm(built.system_prompt, built.context_text, payload.question),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
     )
